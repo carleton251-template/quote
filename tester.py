@@ -7,7 +7,7 @@ import collections
 import signal
 
 TestResult = collections.namedtuple('TestResult', ['output', 'error'])
-
+timed_out_string = "Timed out"
 
 def get_student_output(executable_command, test_path) -> str:
     try:
@@ -23,13 +23,25 @@ def get_student_output(executable_command, test_path) -> str:
         else:
             return student_process.stdout.decode('utf-8')
     except subprocess.TimeoutExpired:
-        return "Timed out"
+        return timed_out_string
 
 
 def get_correct_output(test_path) -> str:
     '''Gets correct output.'''
     with open(test_path, 'r') as correct_output:
         return correct_output.read()
+
+def verify_ends_in_new_line(output: str) -> bool:
+    '''Make sure that last line ends in a newline'''
+
+    # If the output is completely empty, there are no lines at all, so
+    # there's no newline to be found. The standard is that every line
+    # ends in a newline, but in that case, there's no line.
+
+    if len(output) >= 1:
+        return output[-1] in ['\n', '\r']
+    else:
+        return True
 
 
 def clean_output(output: str) -> str:
@@ -88,34 +100,34 @@ def run_tests_with_valgrind(executable_command, test_path) -> TestResult:
         '--errors-for-leak-kinds=all ' + \
         '--error-exitcode=99 ' + \
         executable_command
-
-    try:
-        with open(test_path, 'r') as input_file:
+    with open(test_path, 'r') as input_file:
+    
+        try:
             process = subprocess.run(
                 valgrind_command,
                 stdin=input_file,
                 stderr=subprocess.STDOUT,
                 stdout=subprocess.PIPE,
-                timeout=25,
+                timeout=10,
                 shell=True)
 
-        # Verify that there is no error from Valgrind. This is tough to do
-        # based on error code, because if Valgrind has no error, it passes
-        # through the error code from the original program, which may have
-        # a legitimate error in the case of bad input (i.e., bad Scheme code).
-        # Therefore, test for error by looking for the presence of the string
-        # "0 errors from 0 contexts" which is that Valgrind prints when
-        # no errors.
-        valgrind_error_location = (
-            process.stdout
-            .decode('utf-8')
-            .find("ERROR SUMMARY: 0 errors from 0 contexts")
-        )
-        valgrind_error_found = valgrind_error_location == -1
-        return TestResult(process.stdout.decode('utf-8'),
-                          valgrind_error_found)
-    except subprocess.TimeoutExpired:
-        return TestResult("Timed out", True)
+            # Verify that there is no error from Valgrind. This is tough to do
+            # based on error code, because if Valgrind has no error, it passes
+            # through the error code from the original program, which may have
+            # a legitimate error in the case of bad input (i.e., bad Scheme code).
+            # Therefore, test for error by looking for the presence of the string
+            # "0 errors from 0 contexts" which is that Valgrind prints when
+            # no errors.
+            valgrind_error_location = (
+                process.stdout
+                .decode('utf-8')
+                .find("ERROR SUMMARY: 0 errors from 0 contexts")
+            )
+            valgrind_error_found = valgrind_error_location == -1
+            return TestResult(process.stdout.decode('utf-8'),
+                              valgrind_error_found)
+        except subprocess.TimeoutExpired:
+            return TestResult(timed_out_string, True)
 
 
 def runcmd(cmd, input_text=None):
@@ -125,7 +137,7 @@ def runcmd(cmd, input_text=None):
                           stdout=subprocess.PIPE, encoding='utf-8')
 
 
-def buildCode() -> int:
+def buildCode() -> str:
 
     # Make sure that warnings aren't suppressed
     for filename in os.listdir():
@@ -137,20 +149,24 @@ def buildCode() -> int:
                         return 'Please do not disable warnings.'
 
     # Compile, show output
-    compile_return = runcmd('make')
+    compile_return = runcmd('just build')
     print(compile_return.stdout)
+
+    return_code = str(compile_return.returncode)
 
     # Make sure that warning causes test to fail
     if ('warning' in compile_return.stdout):
         print('Test failed because of compiler warning.')
+        return_code = 'Test failed because of compiler warning.'
 
-    return compile_return.returncode
+    return return_code
 
 
-def runIt(test_dir, valgrind=True) -> None:
+def runIt(test_dir, valgrind=True) -> str:
 
     returncode = buildCode()
-    if returncode != 0:
+    print('return code is ', returncode)
+    if returncode != "0":
         return returncode
 
     error_encountered = False
@@ -165,14 +181,23 @@ def runIt(test_dir, valgrind=True) -> None:
 
         test_input_path = os.path.join(test_dir, test_name + ".scm")
         test_output_path = os.path.join(test_dir, test_name + ".output")
-        student_output = get_student_output(executable_command,
+        student_raw_output = get_student_output(executable_command,
                                             test_input_path)
-        student_output = clean_output(student_output)
+        student_output = clean_output(student_raw_output)
 
-        correct_output = get_correct_output(test_output_path)
-        correct_output = clean_output(correct_output)
+        correct_raw_output = get_correct_output(test_output_path)
+        correct_output = clean_output(correct_raw_output)
 
-        if student_output != correct_output:
+        if not verify_ends_in_new_line(student_raw_output):
+            error_encountered = True
+            print("---OUTPUT INCORRECT---")
+            print("Output does not end in a newline.")
+            print("Student (raw) output:")
+            print(repr(student_raw_output))
+            print('Correct (raw) output:')
+            print(repr(correct_raw_output))
+
+        elif student_output != correct_output:
             error_encountered = True
             print("---OUTPUT INCORRECT---")
             print('Correct output:')
@@ -182,7 +207,7 @@ def runIt(test_dir, valgrind=True) -> None:
         else:
             print("---OUTPUT CORRECT---")
 
-        if valgrind:
+        if valgrind and student_output != timed_out_string:
             valgrind_test_results = run_tests_with_valgrind(
                 executable_command,
                 test_input_path)
@@ -195,4 +220,7 @@ def runIt(test_dir, valgrind=True) -> None:
             else:
                 print('---VALGRIND NO ERROR---')
 
-    return error_encountered
+    if error_encountered:
+        return "Error occurred"
+    else:
+        return ""
